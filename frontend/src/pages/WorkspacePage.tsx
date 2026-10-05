@@ -1,0 +1,29 @@
+import { useMemo, useState } from "react";
+import { useInfiniteQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { askQuestion } from "../services/chatService";
+import { deleteConversation, getConversation, listConversations, renameConversation, type ChatMessage, type Conversation } from "../services/conversationService";
+import { uploadDocument } from "../services/documentService";
+import { getApiErrorMessage } from "../utils/apiError";
+import Sidebar from "../components/Sidebar";
+import MessageBubble from "../components/MessageBubble";
+import EmptyState from "../components/EmptyState";
+import TypingIndicator from "../components/TypingIndicator";
+import ChatInput from "../components/ChatInput";
+import VirtualMessageList from "../components/VirtualMessageList";
+import ChatAttachment, { type ChatAttachment as ChatAttachmentItem } from "../components/ChatAttachment";
+
+export default function WorkspacePage() {
+ const cache = useQueryClient(); const [activeId, setActiveId] = useState<string | null>(null); const [messages, setMessages] = useState<ChatMessage[]>([]); const [attachments, setAttachments] = useState<ChatAttachmentItem[]>([]); const [draft, setDraft] = useState(""); const [menuOpen, setMenuOpen] = useState(false); const [search, setSearch] = useState(""); const [error, setError] = useState("");
+ const conversations = useInfiniteQuery({ queryKey: ["conversations"], queryFn: ({ pageParam }) => listConversations(pageParam), initialPageParam: 0, getNextPageParam: (lastPage, pages) => lastPage.length === 50 ? pages.length * 50 : undefined });
+ const conversationItems = useMemo(() => conversations.data?.pages.flat() || [], [conversations.data]);
+ const load = useMutation({ mutationFn: getConversation, onSuccess: (data) => { setActiveId(data.id); setMessages(data.messages); setAttachments([]); setError(""); } });
+ const chat = useMutation({ mutationFn: askQuestion, onSuccess: (data) => { setActiveId(data.conversation_id); setMessages((items) => [...items.map((item) => ({ ...item, pending: false })), { role: "assistant", content: data.answer, citations: data.citations }]); cache.invalidateQueries({ queryKey: ["conversations"] }); }, onError: (err) => { setMessages((items) => items.filter((item) => !item.pending)); setError(getApiErrorMessage(err, "DocuMind could not answer that question.")); } });
+ const visibleTitle = useMemo(() => conversationItems.find((item) => item.id === activeId)?.title, [conversationItems, activeId]);
+ function newChat() { setActiveId(null); setMessages([]); setAttachments([]); setDraft(""); setError(""); setMenuOpen(false); requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>("textarea")?.focus()); }
+ function send() { const question = draft.trim(); if (!question || chat.isPending) return; setDraft(""); setError(""); setMessages((items) => [...items, { role: "user", content: question, pending: true }]); chat.mutate({ question, conversationId: activeId }); }
+ function choose(id: string) { load.mutate(id); }
+ function rename(item: Conversation) { const title = window.prompt("Rename conversation", item.title)?.trim(); if (!title) return; renameConversation(item.id, title).then(() => cache.invalidateQueries({ queryKey: ["conversations"] })); }
+ function removeConversation(id: string) { if (!window.confirm("Delete this conversation?")) return; deleteConversation(id).then(() => { if (activeId === id) newChat(); cache.invalidateQueries({ queryKey: ["conversations"] }); }); }
+ function upload(file: File) { if (file.type !== "application/pdf" && !file.name.toLowerCase().endsWith(".pdf")) { setError("Select a PDF file."); return; } const attachment: ChatAttachmentItem = { id: crypto.randomUUID(), name: file.name, status: "uploading" }; setAttachments((items) => [...items, attachment]); uploadDocument(file).then(() => { setAttachments((items) => items.map((item) => item.id === attachment.id ? { ...item, status: "indexed" } : item)); }).catch((err) => { setAttachments((items) => items.map((item) => item.id === attachment.id ? { ...item, status: "failed" } : item)); setError(getApiErrorMessage(err, "The document could not be indexed.")); }); }
+ return <div className="min-h-screen bg-canvas text-ink lg:pl-[280px]"><Sidebar open={menuOpen} onClose={() => setMenuOpen(false)} onNew={newChat} conversations={conversationItems} activeId={activeId} search={search} onSearch={setSearch} onSelect={choose} onRename={rename} onDeleteConversation={removeConversation} onLoadMore={() => conversations.fetchNextPage()} hasMore={Boolean(conversations.hasNextPage)} /><main className="flex h-screen flex-col"><header className="flex h-16 shrink-0 items-center gap-3 border-b border-line bg-canvas/90 px-4 backdrop-blur sm:px-8"><button onClick={() => setMenuOpen(true)} className="text-xl lg:hidden" aria-label="Open navigation">☰</button><p className="truncate text-sm font-semibold text-ink">{visibleTitle || "DocuMind AI"}</p></header><section className="min-h-0 flex flex-1 flex-col px-4 py-6 sm:px-8"><div className="min-h-0 flex-1">{messages.length === 0 ? <EmptyState onPrompt={setDraft} /> : <VirtualMessageList messages={messages} />}</div>{(chat.isPending || error) && <div className="mx-auto w-full max-w-3xl shrink-0 py-4">{chat.isPending && <TypingIndicator />}{error && <p role="alert" className="mt-3 rounded-xl border border-[#EDC6C6] bg-[#FFF4F4] p-3 text-sm text-danger">{error}</p>}</div>}</section>{attachments.length > 0 && <div className="border-t border-line bg-canvas px-4 pt-3 sm:px-8"><div className="mx-auto flex max-w-3xl flex-wrap gap-2">{attachments.map((attachment) => <ChatAttachment key={attachment.id} attachment={attachment} />)}</div></div>}<ChatInput value={draft} onChange={setDraft} onSend={send} onUpload={upload} busy={chat.isPending} /></main></div>;
+}
